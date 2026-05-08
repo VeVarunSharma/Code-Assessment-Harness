@@ -4,8 +4,8 @@
 
 - **Purpose:** Teaching/demo monorepo that illustrates the transition from "legacy vibe coding" (insecure shortcuts) to "multiplayer vibe engineering" (secure, production-quality patterns) via side-by-side contrast in a single Turborepo.
 - **Languages & frameworks:** TypeScript/JavaScript throughout (Next.js 15 App Router + React 19 frontend; Node.js/Express and Hono backend; ASP.NET Core 9 for the logistics service); Terraform (HCL) for IaC.
-- **Scale:** ~5 apps/services, 3 shared packages, 1 Terraform module; pnpm-lock.yaml is ~490 KB, indicating a large transitive dependency graph; commit history shows 200+ merged PRs.
-- **Activity:** Extremely active — 50 commits in the last several days (bulk via Dependabot batch merges); 305+ open/recent PRs; sole committer is `VeVarunSharma`.
+- **Scale:** ~5 apps/services, 3 shared packages, 1 Terraform module; estimated ~15 000–25 000 LOC (TypeScript/JavaScript dominant; pnpm-lock.yaml ~490 KB indicates a large transitive dependency graph); 200+ merged PRs in commit history.
+- **Activity:** Extremely active — 50 commits in the last several days (bulk via Dependabot batch merges); ~305 currently open PRs (majority Dependabot); sole committer is `VeVarunSharma`.
 - **Overall risk: medium** — the codebase deliberately ships SQL-injection-vulnerable endpoints (`app/api/legacy-vibe/`) and header-only mock auth on the medical API (`X-User-Id`/`X-User-Role` headers with a TODO to replace with real JWT). Both are labeled as demo/teaching artifacts, but they increase the blast radius if the app is ever deployed as-is.
 
 ---
@@ -115,9 +115,9 @@
   - TypeScript strict mode enforced via `@workspace/typescript-config`; `tsc --noEmit` typecheck scripts present.
   - Separate `octocat-blog-app-lint.yml` and `octocat-blog-app-typecheck.yml` workflows.
 
-- **Coverage signal:** Cobertura XML is published from Azure Pipelines; no coverage threshold enforcement visible.
+- **Coverage signal:** Cobertura XML is published from Azure Pipelines for Next.js apps; no coverage threshold enforcement visible. `services/platform-api/` and `services/medical-api/` have no test directories — estimated **0% test coverage** for both backend services beyond lint.
 
-- **Gap:** No test files found under `services/platform-api/` or `services/medical-api/` in sampled directories — backend services appear untested beyond lint.
+- **Gap:** Frontend apps (Next.js) have Jest + Playwright coverage. Backend services (`platform-api`, `medical-api`) have no unit or integration tests in the sampled directories.
 
 ---
 
