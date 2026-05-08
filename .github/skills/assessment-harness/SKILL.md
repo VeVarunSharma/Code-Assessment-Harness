@@ -57,17 +57,24 @@ Run these once per harness repo. Verify each step before moving on.
      tighter).
 
 3. **Verify Copilot can be assigned to issues in the harness repo.**
-   Run from the harness repo:
+   Run from the harness repo (substitute `<owner>` and `<name>`):
 
    ```bash
-   gh api graphql -f query='
-     query { suggestedActors(loginNames: ["copilot-swe-agent"], capabilities: [CAN_BE_ASSIGNED], first: 1) {
-       nodes { ... on Bot { id login } ... on User { id login } }
-     } }'
+   gh api graphql \
+     -F owner=<owner> -F name=<name> \
+     -f query='
+       query($owner: String!, $name: String!) {
+         repository(owner: $owner, name: $name) {
+           suggestedActors(capabilities: [CAN_BE_ASSIGNED], first: 25) {
+             nodes { ... on Bot { id login } ... on User { id login } }
+           }
+         }
+       }' \
+     --jq '.data.repository.suggestedActors.nodes[] | select(.login=="copilot-swe-agent") | .id'
    ```
 
-   Should return a non-null `id`. Empty result → Cloud Agent isn't enabled
-   here (return to step 1).
+   Should return a non-empty bot id (e.g. `BOT_kgDOC9w8XQ`). Empty result
+   → Cloud Agent isn't enabled here (return to step 1).
 
 4. **Confirm the agent definition loads.**
    Open the harness repo in Copilot CLI and ask:

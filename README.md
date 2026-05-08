@@ -134,14 +134,21 @@ for GitHub to auto-load agents, instructions, and skills.
 4. **Verify Cloud Agent assignment works** in this repo:
 
    ```bash
-   gh api graphql -f query='
-     query { suggestedActors(loginNames: ["copilot-swe-agent"], capabilities: [CAN_BE_ASSIGNED], first: 1) {
-       nodes { ... on Bot { id login } ... on User { id login } }
-     } }'
+   gh api graphql \
+     -F owner=YOUR-ORG -F name=YOUR-HARNESS-REPO \
+     -f query='
+       query($owner: String!, $name: String!) {
+         repository(owner: $owner, name: $name) {
+           suggestedActors(capabilities: [CAN_BE_ASSIGNED], first: 25) {
+             nodes { ... on Bot { id login } ... on User { id login } }
+           }
+         }
+       }' \
+     --jq '.data.repository.suggestedActors.nodes[] | select(.login=="copilot-swe-agent") | .id'
    ```
 
-   Should return a non-null `id`. Empty → Cloud Agent isn't enabled here;
-   escalate to org admin.
+   Should return a non-empty bot id (e.g. `BOT_kgDOC9w8XQ`). Empty →
+   Cloud Agent isn't enabled here; escalate to org admin.
 
 5. **Smoke test with one target** (see "Running an assessment" below).
 
