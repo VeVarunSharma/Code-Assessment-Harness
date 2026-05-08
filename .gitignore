@@ -6,3 +6,7 @@ targets.txt
 # the harness PR history; results/ is just a local cache).
 results/*
 !results/.gitkeep
+
+# Local scratch space for testing helper scripts (extract-sections.sh,
+# render-pretty.sh). Never committed.
+tmp_test/

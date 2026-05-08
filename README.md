@@ -187,19 +187,41 @@ for GitHub to auto-load agents, instructions, and skills.
 
 3. **Wait for Cloud Agent PRs.** Each assignment triggers a session that
    opens a `copilot/...` PR adding
-   `analyses/<owner>__<repo>/assessment.md`.
+   `analyses/<owner>__<repo>/assessment.md`. The agent opens the PR in
+   draft, makes its commits, and then marks the PR ready-for-review when
+   it considers the assessment complete.
 
-4. **Review each PR.** Verify:
+4. **Wait for the `Finalize assessment` workflow to finish.** As soon as
+   the Cloud Agent moves the PR from draft to ready-for-review, the
+   `finalize-assessment` workflow (in `.github/workflows/`) runs and:
+
+   - Validates the assessment file path and slug shape.
+   - Validates that all ten canonical rubric sections are present,
+     non-empty, and in canonical order.
+   - Renders a polished `.md` (title block, severity legend,
+     auto-generated TOC, reviewer-checklist footer).
+   - Uploads the polished `.md` + validation report as a downloadable
+     artifact named `assessment-<slug>` (90-day retention).
+   - Writes a capped inline preview to the Actions Job Summary.
+   - Posts (or auto-updates) a sticky PR comment with the artifact URL,
+     a link to the inline preview, and a link to the source assessment
+     file.
+
+5. **Review each PR.** Use the sticky comment on the PR as your starting
+   point. It tells you whether the assessment passed validation and
+   gives you the artifact URL for the polished `.md`. Then verify:
    - All 10 rubric sections present (per
      `.github/instructions/assessment-standards.instructions.md`).
    - `Coverage gaps` section is honest.
    - `Evidence` section cites file paths with line ranges.
    - No leaked secrets or PII.
 
-5. **Merge approved PRs.** Merging is the explicit human approval gate
+   See "Reviewing assessments" below for the full reviewer flow.
+
+6. **Merge approved PRs.** Merging is the explicit human approval gate
    before sharing with the target app team.
 
-6. **Collect results locally** for archiving or reporting:
+7. **Collect results locally** for archiving or reporting:
 
    ```bash
    HARNESS_REPO=... ./scripts/collect-results.sh merged
@@ -207,6 +229,72 @@ for GitHub to auto-load agents, instructions, and skills.
 
    Default state is `all`; pass `merged` to only collect human-approved
    assessments. Output goes to `results/<owner>__<repo>/pr-<num>.md`.
+
+## Reviewing assessments
+
+The `finalize-assessment` workflow is the bridge between the opaque
+GitHub-managed Copilot Cloud Agent run and a reviewer-friendly artifact.
+It is intentionally a **separate** workflow that runs after the agent
+finishes — Copilot's own workflow (the one that powers the agent
+session) cannot be modified by repo authors and shows up as a single
+"agent" step in the Actions UI.
+
+### What the reviewer sees
+
+When the Cloud Agent marks its PR ready-for-review, the workflow runs
+and produces three reviewer touch-points:
+
+1. **A sticky PR comment** (auto-updates on re-runs):
+   - Pass / fail status with specific failure details if validation failed.
+   - Direct download link to the polished `.md` artifact.
+   - Link to the inline preview in the Actions Job Summary.
+   - Link to the raw source assessment file at the PR's HEAD commit.
+
+2. **Per-step progress in the Actions UI.** Each step in the workflow
+   (Identify file, Validate sections, Render polished `.md`, Upload
+   artifact, Post comment, etc.) is independently named and timed —
+   reviewers can drill into any step's logs.
+
+3. **A downloadable artifact** named `assessment-<owner>__<repo>`:
+   - `assessment-<slug>.md` — the polished assessment with title block,
+     auto-generated TOC, severity legend, and reviewer-checklist footer.
+   - `validation-report.json` — the structured rubric-validation
+     output (expected, found, missing, empty, out-of-order arrays).
+   - 90-day retention by default.
+
+### Validation rules enforced
+
+The workflow fails red on the PR if any of these are true:
+- The PR modifies more than one file (the harness rule is "one
+  assessment per PR").
+- The single changed file's path does not match
+  `analyses/{owner}__{repo}/assessment.md` exactly.
+- Any of the 10 canonical rubric sections is missing.
+- Any rubric section is present but empty.
+- Sections are present but appear out of canonical order.
+
+A failed run still uploads what was produced (the validation report) and
+still posts the sticky comment so the reviewer can see exactly why it
+failed and decide whether to re-prompt the agent or close the PR.
+
+### Re-validating after a follow-up commit
+
+If the Cloud Agent is re-prompted and pushes a new commit to the same
+branch, the PR returns to draft and then back to ready-for-review when
+the agent is done — the workflow re-runs automatically and the sticky
+comment updates in place.
+
+You can also trigger a re-validation manually from **Actions → Finalize
+assessment → Run workflow** with the PR number as input.
+
+### Customizing the polish
+
+The render output is controlled by `scripts/finalize/render-pretty.sh`.
+The validation rules are controlled by `scripts/finalize/extract-sections.sh`,
+which **parses the rubric file at runtime** — so editing the rubric in
+`.github/instructions/assessment-standards.instructions.md` is enough
+to change what the validator enforces. Do not hardcode the section list
+in the workflow.
 
 ## Operator skill
 
