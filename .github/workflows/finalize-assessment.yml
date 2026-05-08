@@ -168,19 +168,21 @@ jobs:
       - name: Render polished .md
         id: render
         env:
-          ASSESSMENT_PATH: ${{ steps.identify.outputs.assessment_path }}
-          TARGET_SLUG:     ${{ steps.identify.outputs.target_slug }}
-          PR_URL:          ${{ github.event_name == 'workflow_dispatch' && steps.resolve.outputs.pr_url || github.event.pull_request.html_url }}
-          RUN_URL:         ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          RUBRIC_BLOB:     ${{ steps.rubric.outputs.rubric_blob }}
+          ASSESSMENT_PATH:  ${{ steps.identify.outputs.assessment_path }}
+          TARGET_SLUG:      ${{ steps.identify.outputs.target_slug }}
+          PR_URL:           ${{ github.event_name == 'workflow_dispatch' && steps.resolve.outputs.pr_url || github.event.pull_request.html_url }}
+          RUN_URL:          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUBRIC_BLOB:      ${{ steps.rubric.outputs.rubric_blob }}
+          HARNESS_REPO_URL: ${{ github.server_url }}/${{ github.repository }}
         run: |
           out_path="out/assessment-${TARGET_SLUG}.md"
           ./scripts/finalize/render-pretty.sh \
-            --assessment     "$ASSESSMENT_PATH" \
-            --target-slug    "$TARGET_SLUG" \
-            --pr-url         "$PR_URL" \
-            --run-url        "$RUN_URL" \
-            --rubric-version "$RUBRIC_BLOB" \
+            --assessment       "$ASSESSMENT_PATH" \
+            --target-slug      "$TARGET_SLUG" \
+            --pr-url           "$PR_URL" \
+            --run-url          "$RUN_URL" \
+            --rubric-version   "$RUBRIC_BLOB" \
+            --harness-repo-url "$HARNESS_REPO_URL" \
             > "$out_path"
           echo "out_path=$out_path" >> "$GITHUB_OUTPUT"
           printf 'Rendered %s lines (raw was %s lines)\n' \
