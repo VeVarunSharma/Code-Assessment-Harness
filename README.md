@@ -1,3 +1,4 @@
+[![Finalize assessment](https://github.com/VeVarunSharma/Code-Assessment-Harness/actions/workflows/finalize-assessment.yml/badge.svg)](https://github.com/VeVarunSharma/Code-Assessment-Harness/actions/workflows/finalize-assessment.yml)
 # Code Assessment Harness
 
 Self-contained harness for using GitHub Copilot Cloud Agents to assess
