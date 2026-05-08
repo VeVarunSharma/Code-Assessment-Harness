@@ -1,0 +1,10 @@
+# One target per line, format: <owner>/<repo>
+# Lines starting with # and blank lines are ignored.
+#
+# For a smoke test, point at one small public repo first:
+octocat/Hello-World
+
+# Then add your real enterprise targets below, one per line, e.g.:
+# your-org/some-app
+# your-org/another-service
+# another-org/shared-library

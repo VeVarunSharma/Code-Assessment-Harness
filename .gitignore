@@ -1,0 +1,8 @@
+# Local-only operational artifacts
+kickoff.log
+targets.txt
+
+# Collected assessments (keep results/ folder, ignore contents — they live in
+# the harness PR history; results/ is just a local cache).
+results/*
+!results/.gitkeep
