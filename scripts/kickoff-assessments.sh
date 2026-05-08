@@ -37,19 +37,32 @@ if ! command -v gh >/dev/null 2>&1; then
   exit 1
 fi
 
-# Resolve Copilot's bot node ID once (it's stable per GH instance, but we
-# look it up to keep the script portable across GHEC/GHES).
+# Resolve Copilot's bot node ID once. suggestedActors is a Repository field
+# (not a top-level Query field), and the loginNames arg is unreliable across
+# schema versions, so we list all assignable actors on the harness repo and
+# filter client-side via jq.
+harness_owner="${HARNESS_REPO%%/*}"
+harness_name="${HARNESS_REPO##*/}"
+
 copilot_bot_id="$(
-  gh api graphql -f query='
-    query { suggestedActors(loginNames: ["copilot-swe-agent"], capabilities: [CAN_BE_ASSIGNED], first: 1) {
-      nodes { ... on Bot { id login } ... on User { id login } }
-    } }' \
-  --jq '.data.suggestedActors.nodes[0].id' 2>/dev/null || true
+  gh api graphql \
+    -F owner="$harness_owner" -F name="$harness_name" \
+    -f query='
+      query($owner: String!, $name: String!) {
+        repository(owner: $owner, name: $name) {
+          suggestedActors(capabilities: [CAN_BE_ASSIGNED], first: 50) {
+            nodes { ... on Bot { id login } ... on User { id login } }
+          }
+        }
+      }' \
+    --jq '.data.repository.suggestedActors.nodes[] | select(.login=="copilot-swe-agent") | .id' \
+    2>/dev/null || true
 )"
 
 if [[ -z "$copilot_bot_id" || "$copilot_bot_id" == "null" ]]; then
   echo "error: could not resolve Copilot bot id via suggestedActors." >&2
   echo "       Verify Copilot coding agent is enabled for $HARNESS_REPO." >&2
+  echo "       (At repo Settings → Code & automation → Copilot, or org level.)" >&2
   exit 1
 fi
 

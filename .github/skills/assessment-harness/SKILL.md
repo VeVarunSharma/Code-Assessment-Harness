@@ -57,17 +57,24 @@ Run these once per harness repo. Verify each step before moving on.
      tighter).
 
 3. **Verify Copilot can be assigned to issues in the harness repo.**
-   Run from the harness repo:
+   Run from the harness repo (substitute `<owner>` and `<name>`):
 
    ```bash
-   gh api graphql -f query='
-     query { suggestedActors(loginNames: ["copilot-swe-agent"], capabilities: [CAN_BE_ASSIGNED], first: 1) {
-       nodes { ... on Bot { id login } ... on User { id login } }
-     } }'
+   gh api graphql \
+     -F owner=<owner> -F name=<name> \
+     -f query='
+       query($owner: String!, $name: String!) {
+         repository(owner: $owner, name: $name) {
+           suggestedActors(capabilities: [CAN_BE_ASSIGNED], first: 25) {
+             nodes { ... on Bot { id login } ... on User { id login } }
+           }
+         }
+       }' \
+     --jq '.data.repository.suggestedActors.nodes[] | select(.login=="copilot-swe-agent") | .id'
    ```
 
-   Should return a non-null `id`. Empty result → Cloud Agent isn't enabled
-   here (return to step 1).
+   Should return a non-empty bot id (e.g. `BOT_kgDOC9w8XQ`). Empty result
+   → Cloud Agent isn't enabled here (return to step 1).
 
 4. **Confirm the agent definition loads.**
    Open the harness repo in Copilot CLI and ask:
@@ -129,7 +136,20 @@ chunks of 25–50, run them an hour apart, and watch `gh api rate_limit`. See
 
 ## Task 4 — Review and collect results
 
-1. **Review in PR UI.** Each assessment PR adds exactly one
+1. **Wait for the `Finalize assessment` check.** Each Copilot PR
+   triggers `.github/workflows/finalize-assessment.yml` as soon as the
+   agent moves the PR from draft to ready-for-review. The workflow
+   posts a sticky PR comment with:
+   - Pass/fail status against the 10-section rubric (presence,
+     non-empty, canonical order).
+   - A direct download link to the polished `.md` artifact (named
+     `assessment-<owner>__<repo>`, 90-day retention).
+   - A link to an inline preview in the Actions Job Summary.
+
+   The sticky comment is the reviewer's starting point. If validation
+   failed, re-prompt the Cloud Agent or close the PR — do not merge.
+
+2. **Review in PR UI.** Each assessment PR adds exactly one
    `analyses/<owner>__<repo>/assessment.md`. Reviewer checks:
    - All ten rubric sections present (per
      `.github/instructions/assessment-standards.instructions.md`).
@@ -138,10 +158,10 @@ chunks of 25–50, run them an hour apart, and watch `gh api rate_limit`. See
    - No secrets/PII leaked into the assessment.
    - Risk rating matches the cited evidence.
 
-2. **Merge approved PRs.** Merging is the human "share with app team" gate.
+3. **Merge approved PRs.** Merging is the human "share with app team" gate.
    Unmerged PRs hold drafts/in-flight work.
 
-3. **Pull results locally** for archiving or batch reporting:
+4. **Pull results locally** for archiving or batch reporting:
 
    ```bash
    HARNESS_REPO=<owner>/<harness-repo> ./scripts/collect-results.sh merged
@@ -150,6 +170,11 @@ chunks of 25–50, run them an hour apart, and watch `gh api rate_limit`. See
    Pass `merged` to only collect human-approved assessments. Default is
    `all` (open + merged + closed). Output goes to
    `results/<owner>__<repo>/pr-<num>.md`.
+
+5. **Re-validate after a fix.** If the agent is re-prompted and pushes
+   a new commit, the workflow re-runs automatically when the PR moves
+   back to ready-for-review. You can also trigger it manually from
+   **Actions → Finalize assessment → Run workflow** with the PR number.
 
 ## Task 5 — Diagnose a failed or incomplete assessment
 

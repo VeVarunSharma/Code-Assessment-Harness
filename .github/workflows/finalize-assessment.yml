@@ -1,0 +1,379 @@
+name: Finalize assessment
+
+# Triggered when the Cloud Agent moves an assessment PR from draft to
+# ready-for-review. This is the post-processing step that the Copilot Cloud
+# Agent's own (GitHub-managed, opaque) workflow does NOT perform: it gives
+# reviewers per-step progress in the Actions UI, validates the assessment
+# against the rubric, publishes a polished `.md` artifact with a stable URL,
+# and posts a sticky comment back on the PR.
+
+on:
+  pull_request:
+    types: [ready_for_review]
+    branches: [main]
+  # Allow re-running manually from the Actions tab against any PR — useful
+  # when a reviewer wants to re-validate after a follow-up commit, or to
+  # back-fill the artifact for an existing assessment PR.
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to finalize"
+        required: true
+        type: number
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  finalize:
+    name: Validate, render, publish
+    runs-on: ubuntu-latest
+    # Only run on the Cloud Agent's `copilot/*` branches, AND only when the
+    # PR's head is in this same repo (not a fork). Fork branches named
+    # `copilot/*` could otherwise trigger this workflow with attacker-
+    # controlled scripts; the same-repo guard plus the strict file-shape
+    # check below collapses the practical attack surface.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        startsWith(github.event.pull_request.head.ref, 'copilot/')
+      )
+    steps:
+      - name: Resolve PR ref (workflow_dispatch path)
+        id: resolve
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          REPO: ${{ github.repository }}
+        run: |
+          ref=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid       -q .headRefOid)
+          html=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json url             -q .url)
+          head_repo=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRepository -q .headRepository.nameWithOwner)
+          if [[ "$head_repo" != "$REPO" ]]; then
+            echo "::error::Refusing to finalize: PR head is in $head_repo, not $REPO. Fork PRs are not supported."
+            exit 1
+          fi
+          {
+            echo "head_sha=$ref"
+            echo "pr_url=$html"
+            echo "pr_number=$PR_NUMBER"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && steps.resolve.outputs.head_sha || github.event.pull_request.head.sha }}
+          # Need history so we can resolve the rubric blob hash from the
+          # parent commit on `main` (used as the rubric version).
+          fetch-depth: 0
+
+      - name: Identify assessment file from PR diff
+        id: identify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event_name == 'workflow_dispatch' && steps.resolve.outputs.pr_number || github.event.pull_request.number }}
+        run: |
+          # Source of truth for "what changed in this PR" is the GitHub API,
+          # not the working tree (the working tree contains every previously
+          # merged assessment). This means the validator scales as the
+          # repo accumulates assessments.
+          mapfile -t changed < <(gh pr view "$PR_NUMBER" --repo "$REPO" --json files --jq '.files[].path')
+
+          if [[ ${#changed[@]} -eq 0 ]]; then
+            echo "::error::PR has no changed files."
+            exit 1
+          fi
+          if [[ ${#changed[@]} -gt 1 ]]; then
+            echo "::error::PR modifies ${#changed[@]} files; expected exactly one (the harness rule is one assessment per PR). Files: ${changed[*]}"
+            exit 1
+          fi
+
+          path="${changed[0]}"
+
+          # Strict regex on the full path. Owner and repo names per GitHub
+          # rules: alphanumerics, hyphens, dots, underscores. The "__"
+          # separator collapses owner and repo into a directory-safe slug.
+          if [[ ! "$path" =~ ^analyses/[A-Za-z0-9._-]+__[A-Za-z0-9._-]+/assessment\.md$ ]]; then
+            echo "::error::Changed file '$path' does not match analyses/{owner}__{repo}/assessment.md"
+            exit 1
+          fi
+
+          slug="${path#analyses/}"
+          slug="${slug%/assessment.md}"
+
+          # Defense in depth: re-validate the slug shape after extraction.
+          if [[ ! "$slug" =~ ^[A-Za-z0-9._-]+__[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::Slug '$slug' does not match strict shape."
+            exit 1
+          fi
+
+          # Confirm the file exists in the checkout (paranoid sanity check).
+          if [[ ! -f "$path" ]]; then
+            echo "::error::Path '$path' is in the PR diff but missing from the checkout."
+            exit 1
+          fi
+
+          {
+            echo "assessment_path=$path"
+            echo "target_slug=$slug"
+          } >> "$GITHUB_OUTPUT"
+          printf 'Found single PR-changed assessment: %s\n' "$path"
+          printf 'Target slug: %s\n'                       "$slug"
+
+      - name: Resolve rubric version (blob hash)
+        id: rubric
+        run: |
+          # The rubric blob hash is more meaningful than the commit SHA:
+          # it changes only when the rubric file's content changes, so
+          # reviewers can correlate assessments rendered against the same
+          # rubric version even across unrelated commits.
+          rubric_blob=$(git rev-parse HEAD:.github/instructions/assessment-standards.instructions.md)
+          echo "rubric_blob=$rubric_blob" >> "$GITHUB_OUTPUT"
+          printf 'Rubric blob: %s\n' "$rubric_blob"
+
+      - name: Validate rubric sections (10 expected, ordered, non-empty)
+        id: validate
+        env:
+          ASSESSMENT_PATH: ${{ steps.identify.outputs.assessment_path }}
+        run: |
+          mkdir -p out
+          ./scripts/finalize/extract-sections.sh \
+            .github/instructions/assessment-standards.instructions.md \
+            "$ASSESSMENT_PATH" \
+            > out/validation-report.json
+
+          ok=$(jq -r '.ok'                                 out/validation-report.json)
+          missing_count=$(jq -r '.missing      | length'   out/validation-report.json)
+          empty_count=$(jq   -r '.empty        | length'   out/validation-report.json)
+          order_count=$(jq   -r '.out_of_order | length'   out/validation-report.json)
+
+          {
+            echo "ok=$ok"
+            echo "missing_count=$missing_count"
+            echo "empty_count=$empty_count"
+            echo "order_count=$order_count"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Validation report:"
+          jq . out/validation-report.json
+
+          if [[ "$ok" != "true" ]]; then
+            echo "::error::Assessment failed rubric validation. missing=$missing_count empty=$empty_count out_of_order=$order_count"
+          fi
+
+      - name: Render polished .md
+        id: render
+        env:
+          ASSESSMENT_PATH: ${{ steps.identify.outputs.assessment_path }}
+          TARGET_SLUG:     ${{ steps.identify.outputs.target_slug }}
+          PR_URL:          ${{ github.event_name == 'workflow_dispatch' && steps.resolve.outputs.pr_url || github.event.pull_request.html_url }}
+          RUN_URL:         ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUBRIC_BLOB:     ${{ steps.rubric.outputs.rubric_blob }}
+        run: |
+          out_path="out/assessment-${TARGET_SLUG}.md"
+          ./scripts/finalize/render-pretty.sh \
+            --assessment     "$ASSESSMENT_PATH" \
+            --target-slug    "$TARGET_SLUG" \
+            --pr-url         "$PR_URL" \
+            --run-url        "$RUN_URL" \
+            --rubric-version "$RUBRIC_BLOB" \
+            > "$out_path"
+          echo "out_path=$out_path" >> "$GITHUB_OUTPUT"
+          printf 'Rendered %s lines (raw was %s lines)\n' \
+            "$(wc -l < "$out_path")" \
+            "$(wc -l < "$ASSESSMENT_PATH")"
+
+      - name: Upload artifact (polished .md + validation report)
+        id: upload
+        # Upload only when render succeeded — otherwise the polished .md is
+        # absent and the artifact would mislead reviewers. The validation
+        # report alone is preserved via the Job Summary regardless.
+        if: steps.render.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: assessment-${{ steps.identify.outputs.target_slug }}
+          path: out/
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Write Job Summary (validation result + capped preview)
+        if: always()
+        env:
+          TARGET_SLUG:   ${{ steps.identify.outputs.target_slug }}
+          PR_URL:        ${{ github.event_name == 'workflow_dispatch' && steps.resolve.outputs.pr_url || github.event.pull_request.html_url }}
+          ARTIFACT_URL:  ${{ steps.upload.outputs.artifact-url }}
+          OUT_PATH:      ${{ steps.render.outputs.out_path }}
+          OK:            ${{ steps.validate.outputs.ok }}
+          MISSING_COUNT: ${{ steps.validate.outputs.missing_count }}
+          EMPTY_COUNT:   ${{ steps.validate.outputs.empty_count }}
+          ORDER_COUNT:   ${{ steps.validate.outputs.order_count }}
+          RUN_URL:       ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RENDER_OUTCOME: ${{ steps.render.outcome }}
+        run: |
+          status_icon='✅'
+          status_text='pass'
+          if [[ "$OK" != "true" ]]; then
+            status_icon='❌'
+            status_text='FAIL'
+          fi
+
+          {
+            echo "# Assessment finalize report"
+            echo
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            printf '| Target | `%s` |\n'    "${TARGET_SLUG:-unknown}"
+            printf '| Source PR | %s |\n'   "${PR_URL:-unknown}"
+            printf '| Validation | %s %s |\n' "$status_icon" "$status_text"
+            if [[ -n "${ARTIFACT_URL:-}" ]]; then
+              printf '| Artifact | [download](%s) |\n' "$ARTIFACT_URL"
+            else
+              printf '| Artifact | _not produced_ |\n'
+            fi
+            printf '| Run | %s |\n' "$RUN_URL"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$OK" != "true" ]]; then
+            {
+              echo "## ❌ Validation failures"
+              echo
+              if [[ "${MISSING_COUNT:-0}" != "0" ]]; then
+                echo "**Missing sections (${MISSING_COUNT}):**"
+                echo
+                jq -r '.missing[]' out/validation-report.json | sed 's/^/- `/' | sed 's/$/`/'
+                echo
+              fi
+              if [[ "${EMPTY_COUNT:-0}" != "0" ]]; then
+                echo "**Empty sections (${EMPTY_COUNT}):**"
+                echo
+                jq -r '.empty[]' out/validation-report.json | sed 's/^/- `/' | sed 's/$/`/'
+                echo
+              fi
+              if [[ "${ORDER_COUNT:-0}" != "0" ]]; then
+                echo "**Out-of-order sections (${ORDER_COUNT}):**"
+                echo
+                jq -r '.out_of_order[]' out/validation-report.json | sed 's/^/- `/' | sed 's/$/`/'
+                echo
+              fi
+              echo "The Cloud Agent must be re-prompted to address these gaps before the assessment can be merged."
+              echo
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [[ "$RENDER_OUTCOME" == "success" && -n "${OUT_PATH:-}" && -f "$OUT_PATH" ]]; then
+            # Cap inline preview at 400 lines to stay well under GitHub's
+            # 1MB Job Summary limit. Reviewers get the full file via the
+            # artifact; the inline preview is a quick scan.
+            preview_lines=400
+            total_lines=$(wc -l < "$OUT_PATH")
+            {
+              echo "## Polished assessment"
+              if [[ "$total_lines" -gt "$preview_lines" ]]; then
+                echo "_Inline preview truncated to first ${preview_lines} of ${total_lines} lines. [Download the full polished .md](${ARTIFACT_URL:-#}) for the complete report._"
+                echo
+              fi
+              echo
+              head -n "$preview_lines" "$OUT_PATH"
+              if [[ "$total_lines" -gt "$preview_lines" ]]; then
+                echo
+                echo
+                echo "_… ($((total_lines - preview_lines)) more lines in the artifact)_"
+              fi
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "## ⚠️ Render did not produce a polished file"
+              echo
+              echo "The render step did not complete successfully (\`render.outcome=$RENDER_OUTCOME\`)."
+              echo "Inspect the workflow logs for the failure cause."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Build sticky PR comment body
+        id: comment
+        if: always()
+        env:
+          TARGET_SLUG:   ${{ steps.identify.outputs.target_slug }}
+          ARTIFACT_URL:  ${{ steps.upload.outputs.artifact-url }}
+          ASSESSMENT_PATH: ${{ steps.identify.outputs.assessment_path }}
+          OK:            ${{ steps.validate.outputs.ok }}
+          MISSING_COUNT: ${{ steps.validate.outputs.missing_count }}
+          EMPTY_COUNT:   ${{ steps.validate.outputs.empty_count }}
+          ORDER_COUNT:   ${{ steps.validate.outputs.order_count }}
+          RENDER_OUTCOME: ${{ steps.render.outcome }}
+          BLOB_REF:      ${{ github.event_name == 'workflow_dispatch' && steps.resolve.outputs.head_sha || github.event.pull_request.head.sha }}
+          RUN_URL:       ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPO_URL:      ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          status_icon='✅'
+          status_text='Assessment finalized'
+          status_summary='All ten rubric sections are present, non-empty, and in canonical order.'
+          if [[ "$OK" != "true" ]]; then
+            status_icon='❌'
+            status_text='Assessment validation failed'
+            status_summary='See the failure details below before merging.'
+          fi
+
+          {
+            printf '## %s %s\n\n' "$status_icon" "$status_text"
+            printf '**Target:** `%s`  \n' "${TARGET_SLUG:-unknown}"
+            printf '%s\n\n' "$status_summary"
+
+            if [[ "$OK" != "true" ]]; then
+              echo "### Failure details"
+              echo
+              if [[ "${MISSING_COUNT:-0}" != "0" ]]; then
+                printf -- '- **Missing sections (%s):**\n' "$MISSING_COUNT"
+                jq -r '.missing[]' out/validation-report.json | sed 's/^/    - `/' | sed 's/$/`/'
+              fi
+              if [[ "${EMPTY_COUNT:-0}" != "0" ]]; then
+                printf -- '- **Empty sections (%s):**\n' "$EMPTY_COUNT"
+                jq -r '.empty[]' out/validation-report.json | sed 's/^/    - `/' | sed 's/$/`/'
+              fi
+              if [[ "${ORDER_COUNT:-0}" != "0" ]]; then
+                printf -- '- **Out-of-order sections (%s):**\n' "$ORDER_COUNT"
+                jq -r '.out_of_order[]' out/validation-report.json | sed 's/^/    - `/' | sed 's/$/`/'
+              fi
+              echo
+              echo "🔁 Re-prompt the Cloud Agent to fill these gaps and push to this branch."
+              echo
+            fi
+
+            echo "### Reviewer links"
+            echo
+            if [[ "$RENDER_OUTCOME" == "success" && -n "${ARTIFACT_URL:-}" ]]; then
+              printf -- '- 📥 [Download polished `.md` artifact](%s)\n' "$ARTIFACT_URL"
+            else
+              echo "- ⚠️ No polished artifact (render failed; see Actions log)"
+            fi
+            printf -- '- 👀 [View inline preview in Actions Job Summary](%s)\n' "$RUN_URL"
+            if [[ -n "${ASSESSMENT_PATH:-}" ]]; then
+              printf -- '- 🤖 [Source assessment file](%s/blob/%s/%s)\n' "$REPO_URL" "$BLOB_REF" "$ASSESSMENT_PATH"
+            fi
+            echo
+            echo "<sub>Generated by the <code>finalize-assessment</code> workflow. This comment auto-updates on re-runs.</sub>"
+          } > comment-body.md
+
+          echo "--- comment body ---"
+          cat comment-body.md
+
+      - name: Post sticky PR comment
+        if: always()
+        # Pinned to v3.0.4 commit SHA for supply-chain integrity.
+        # Bump by replacing the SHA after reviewing the new release diff.
+        uses: marocchino/sticky-pull-request-comment@0ea0beb66eb9baf113663a64ec522f60e49231c0
+        with:
+          number: ${{ github.event_name == 'workflow_dispatch' && steps.resolve.outputs.pr_number || github.event.pull_request.number }}
+          header: finalize-assessment
+          path: comment-body.md
+
+      - name: Fail if validation failed
+        if: steps.validate.outputs.ok != 'true'
+        run: |
+          echo "Validation failed — see Job Summary and PR comment for details."
+          exit 1
